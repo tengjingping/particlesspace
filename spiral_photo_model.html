@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D 螺旋照片模型</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0a0a0f; overflow:hidden; font-family:'Helvetica Neue',sans-serif; color:#fff; }
+  #app { position:relative; width:100vw; height:100vh; }
+  canvas { display:block; width:100%; height:100%; }
+
+  #ui {
+    position:absolute; top:20px; left:50%; transform:translateX(-50%);
+    display:flex; gap:10px; z-index:10; flex-wrap:wrap; justify-content:center;
+  }
+  .btn {
+    cursor:pointer; padding:9px 22px; border-radius:22px; font-size:13px;
+    border:0.5px solid rgba(255,255,255,0.25); backdrop-filter:blur(10px);
+    transition:all 0.2s; white-space:nowrap;
+  }
+  #btnUpload { background:rgba(255,255,255,0.1); color:#fff; }
+  #btnUpload:hover { background:rgba(255,255,255,0.22); }
+  #btnTwist  { background:rgba(120,80,255,0.3); color:#c8aaff; border-color:rgba(160,120,255,0.4); }
+  #btnTwist:hover  { background:rgba(120,80,255,0.55); }
+  #btnWave   { background:rgba(0,180,160,0.3); color:#80eedd; border-color:rgba(0,200,180,0.4); }
+  #btnWave:hover   { background:rgba(0,180,160,0.55); }
+  #btnExplode{ background:rgba(255,100,60,0.3); color:#ffb89a; border-color:rgba(255,120,80,0.4); }
+  #btnExplode:hover{ background:rgba(255,100,60,0.55); }
+  #btnReset  { background:rgba(255,255,255,0.07); color:rgba(255,255,255,0.55); }
+  #btnReset:hover  { background:rgba(255,255,255,0.15); }
+
+  #hint {
+    position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
+    color:rgba(255,255,255,0.3); font-size:12px; pointer-events:none;
+    text-align:center; line-height:1.8;
+  }
+  #counter {
+    position:absolute; bottom:20px; right:24px;
+    color:rgba(255,255,255,0.28); font-size:12px;
+  }
+  #dropzone {
+    position:absolute; inset:0; background:rgba(100,60,255,0.18);
+    border:2px dashed rgba(160,120,255,0.6); display:none;
+    align-items:center; justify-content:center;
+    font-size:22px; color:rgba(200,170,255,0.8);
+    pointer-events:none; z-index:20;
+  }
+  #dropzone.active { display:flex; }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="c"></canvas>
+
+  <div id="ui">
+    <label class="btn" id="btnUpload">
+      ＋ 加入照片
+      <input type="file" accept="image/*" multiple style="display:none" id="fileInput">
+    </label>
+    <button class="btn" id="btnTwist">扭曲</button>
+    <button class="btn" id="btnWave">波浪</button>
+    <button class="btn" id="btnExplode">爆散</button>
+    <button class="btn" id="btnReset">重設</button>
+  </div>
+
+  <div id="dropzone">拖放照片到這裡</div>
+
+  <div id="hint">
+    拖曳旋轉 · 滾輪 / 雙指縮放 · 拖放圖片加入螺旋
+  </div>
+  <div id="counter">0 張自訂 / 32 節點</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ─── Renderer ────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(0x0a0a0f, 1);
+renderer.shadowMap.enabled = true;
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a0f, 0.025);
+
+const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 300);
+camera.position.set(0, 0, 20);
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ─── Lighting ────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+const d1 = new THREE.DirectionalLight(0xaa88ff, 1.4);
+d1.position.set(6, 10, 6); scene.add(d1);
+const d2 = new THREE.DirectionalLight(0x44ddcc, 0.9);
+d2.position.set(-7, -5, 4); scene.add(d2);
+const d3 = new THREE.PointLight(0xff6644, 0.6, 40);
+d3.position.set(0, -8, 0); scene.add(d3);
+
+// ─── Particle background ─────────────────────────────────────
+const starGeo = new THREE.BufferGeometry();
+const starVerts = [];
+for(let i=0;i<800;i++){
+  starVerts.push((Math.random()-0.5)*120, (Math.random()-0.5)*120, (Math.random()-0.5)*120);
+}
+starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starVerts,3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({color:0xffffff,size:0.08,transparent:true,opacity:0.5})));
+
+// ─── Constants ───────────────────────────────────────────────
+const TOTAL  = 32;
+const RADIUS = 4.5;
+const TURNS  = 2.5;
+const HEIGHT = 14;
+
+// ─── Placeholder textures ────────────────────────────────────
+function makePlaceholder(i) {
+  const sz = 256, cv = document.createElement('canvas');
+  cv.width = cv.height = sz;
+  const ctx = cv.getContext('2d');
+  const hue = (i / TOTAL) * 360;
+  const g = ctx.createLinearGradient(0, 0, sz, sz);
+  g.addColorStop(0, `hsl(${hue},65%,52%)`);
+  g.addColorStop(1, `hsl(${(hue+70)%360},55%,30%)`);
+  ctx.fillStyle = g; ctx.fillRect(0,0,sz,sz);
+  // subtle grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth=1;
+  for(let l=0;l<sz;l+=32){ ctx.beginPath();ctx.moveTo(l,0);ctx.lineTo(l,sz);ctx.stroke(); }
+  for(let l=0;l<sz;l+=32){ ctx.beginPath();ctx.moveTo(0,l);ctx.lineTo(sz,l);ctx.stroke(); }
+  ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.lineWidth=3;
+  ctx.strokeRect(5,5,sz-10,sz-10);
+  ctx.fillStyle='rgba(255,255,255,0.18)';
+  ctx.font=`bold 52px sans-serif`; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(i+1, sz/2, sz/2);
+  return new THREE.CanvasTexture(cv);
+}
+
+const textures = Array.from({length:TOTAL},(_,i)=>makePlaceholder(i));
+let userTexCount = 0;
+
+// ─── Build scene group ───────────────────────────────────────
+const group = new THREE.Group();
+scene.add(group);
+
+// Spiral tube
+const tubePoints = [];
+for(let i=0;i<=200;i++){
+  const t = i/200, a = t*TURNS*Math.PI*2;
+  tubePoints.push(new THREE.Vector3(Math.cos(a)*RADIUS, t*HEIGHT-HEIGHT/2, Math.sin(a)*RADIUS));
+}
+const tubeMesh = new THREE.Mesh(
+  new THREE.TubeGeometry(new THREE.CatmullRomCurve3(tubePoints), 200, 0.045, 8, false),
+  new THREE.MeshBasicMaterial({color:0x6633cc, transparent:true, opacity:0.3})
+);
+group.add(tubeMesh);
+
+// Photo nodes
+const nodes = [];
+const planeGeo = new THREE.PlaneGeometry(1.7, 1.7);
+
+for(let i=0;i<TOTAL;i++){
+  const t = i/(TOTAL-1);
+  const angle = t*TURNS*Math.PI*2;
+  const ox = Math.cos(angle)*RADIUS;
+  const oz = Math.sin(angle)*RADIUS;
+  const oy = t*HEIGHT - HEIGHT/2;
+
+  const mat = new THREE.MeshStandardMaterial({
+    map: textures[i], side: THREE.DoubleSide,
+    roughness:0.4, metalness:0.1,
+    transparent:true, opacity:0.93
+  });
+  const mesh = new THREE.Mesh(planeGeo, mat);
+  mesh.position.set(ox, oy, oz);
+  mesh.lookAt(0, oy, 0);
+
+  // Border frame
+  const frame = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.PlaneGeometry(1.75,1.75)),
+    new THREE.LineBasicMaterial({color:0xffffff, transparent:true, opacity:0.15})
+  );
+  mesh.add(frame);
+
+  group.add(mesh);
+  nodes.push({ mesh, origin:{x:ox,y:oy,z:oz,angle,t} });
+}
+
+// ─── Orbit controls (manual) ─────────────────────────────────
+let isDrag=false, lx=0, ly=0;
+let rotY=0, rotX=0, targetRotY=0, targetRotX=0;
+let autoSpin=true;
+let zoom=20, targetZoom=20;
+
+canvas.addEventListener('mousedown',e=>{isDrag=true;lx=e.clientX;ly=e.clientY;autoSpin=false;});
+window.addEventListener('mouseup',()=>{isDrag=false;});
+window.addEventListener('mousemove',e=>{
+  if(!isDrag)return;
+  targetRotY+=(e.clientX-lx)*0.009;
+  targetRotX+=(e.clientY-ly)*0.006;
+  targetRotX=Math.max(-1.3,Math.min(1.3,targetRotX));
+  lx=e.clientX; ly=e.clientY;
+});
+canvas.addEventListener('wheel',e=>{
+  targetZoom=Math.max(5,Math.min(32,targetZoom+e.deltaY*0.025));
+  e.preventDefault();
+},{passive:false});
+
+// Touch
+let tLast=null, tDist=0;
+canvas.addEventListener('touchstart',e=>{
+  autoSpin=false;
+  if(e.touches.length===1){ tLast={x:e.touches[0].clientX,y:e.touches[0].clientY}; }
+  if(e.touches.length===2){
+    tDist=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
+  }
+  e.preventDefault();
+},{passive:false});
+canvas.addEventListener('touchmove',e=>{
+  if(e.touches.length===1&&tLast){
+    targetRotY+=(e.touches[0].clientX-tLast.x)*0.012;
+    targetRotX+=(e.touches[0].clientY-tLast.y)*0.008;
+    targetRotX=Math.max(-1.3,Math.min(1.3,targetRotX));
+    tLast={x:e.touches[0].clientX,y:e.touches[0].clientY};
+  }
+  if(e.touches.length===2){
+    const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
+    targetZoom=Math.max(5,Math.min(32,targetZoom-(d-tDist)*0.04));
+    tDist=d;
+  }
+  e.preventDefault();
+},{passive:false});
+canvas.addEventListener('touchend',()=>{tLast=null;},{passive:false});
+
+// ─── Animation state ─────────────────────────────────────────
+let mode='idle', modeClock=0, clock=0;
+
+function setMode(m){ mode=m; modeClock=0; }
+document.getElementById('btnTwist').onclick   = ()=>setMode('twist');
+document.getElementById('btnWave').onclick    = ()=>setMode('wave');
+document.getElementById('btnExplode').onclick = ()=>setMode('explode');
+document.getElementById('btnReset').onclick   = ()=>{
+  setMode('idle'); autoSpin=true;
+  targetRotY=0; targetRotX=0; targetZoom=20;
+};
+
+// ─── File upload ─────────────────────────────────────────────
+function loadImageFile(file, slot){
+  const url=URL.createObjectURL(file);
+  new THREE.TextureLoader().load(url,tex=>{
+    nodes[slot].mesh.material.map=tex;
+    nodes[slot].mesh.material.needsUpdate=true;
+    URL.revokeObjectURL(url);
+    document.getElementById('counter').textContent=`${userTexCount} 張自訂 / ${TOTAL} 節點`;
+  });
+}
+document.getElementById('fileInput').addEventListener('change',e=>{
+  Array.from(e.target.files).forEach(f=>{ loadImageFile(f, userTexCount % TOTAL); userTexCount++; });
+  e.target.value='';
+});
+
+// Drag & drop
+const dz=document.getElementById('dropzone');
+document.body.addEventListener('dragover',e=>{ e.preventDefault(); dz.classList.add('active'); });
+document.body.addEventListener('dragleave',()=>dz.classList.remove('active'));
+document.body.addEventListener('drop',e=>{
+  e.preventDefault(); dz.classList.remove('active');
+  Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith('image/')).forEach(f=>{
+    loadImageFile(f, userTexCount % TOTAL); userTexCount++;
+  });
+});
+
+// ─── Render loop ─────────────────────────────────────────────
+function animate(){
+  requestAnimationFrame(animate);
+  clock+=0.016; modeClock+=0.016;
+
+  // Smooth orbit
+  rotY+=(targetRotY-rotY)*0.08;
+  rotX+=(targetRotX-rotX)*0.08;
+  zoom+=(targetZoom-zoom)*0.08;
+  camera.position.z=zoom;
+
+  if(autoSpin) targetRotY+=0.004;
+  group.rotation.y=rotY;
+  group.rotation.x=rotX;
+
+  // Gentle global sway
+  group.rotation.y+=Math.sin(clock*0.15)*0.001;
+
+  nodes.forEach((n,i)=>{
+    const {mesh,origin}=n;
+    let dx=0,dy=0,dz=0,sc=1,op=0.93;
+    const phase = i*0.38;
+
+    if(mode==='twist'){
+      const amt=Math.sin(modeClock*1.1)*3.2;
+      const na=origin.angle+origin.t*amt;
+      dx=Math.cos(na)*RADIUS-origin.x;
+      dz=Math.sin(na)*RADIUS-origin.z;
+      sc=0.88+Math.sin(modeClock*2+phase)*0.18;
+    } else if(mode==='wave'){
+      dy=Math.sin(phase+modeClock*2.2)*2.2;
+      dx=Math.cos(phase*0.7+modeClock*1.6)*1.0;
+      sc=0.82+Math.sin(phase+modeClock*1.9)*0.22;
+      op=0.7+Math.sin(phase+modeClock*1.2)*0.25;
+    } else if(mode==='explode'){
+      const prog=Math.min(modeClock/1.6,1);
+      const back=prog>0.65?1-(prog-0.65)/0.35:1;
+      const dir=new THREE.Vector3(origin.x,origin.y,origin.z).normalize();
+      dx=dir.x*5.5*prog*back;
+      dy=dir.y*4.0*prog*back;
+      dz=dir.z*5.5*prog*back;
+      sc=0.65+prog*back*0.6;
+      op=1-prog*back*0.45;
+      if(modeClock>2.4){ mode='idle'; }
+    }
+
+    // Always-on breath
+    dy+=Math.sin(clock*0.55+phase)*0.14;
+    sc+=Math.sin(clock*0.75+phase)*0.022;
+
+    mesh.position.set(origin.x+dx, origin.y+dy, origin.z+dz);
+    mesh.scale.setScalar(sc);
+    mesh.material.opacity=Math.max(0.1,Math.min(1,op));
+    mesh.lookAt(group.localToWorld(new THREE.Vector3(0,origin.y+dy,0)));
+    mesh.rotateY(Math.sin(clock*0.35+phase)*0.09);
+  });
+
+  renderer.render(scene,camera);
+}
+animate();
+</script>
+</body>
+</html>
